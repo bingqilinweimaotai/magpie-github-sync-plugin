@@ -150,7 +150,7 @@ test("native Magpie: encrypted upload, unchanged sync, restore and undo in a fre
   assert.ok(backup);
   assert.equal(JSON.parse(backup.bytes).format, "magpie-backup");
   assert.equal(backup.bytes.includes(Buffer.from('"theme"')), false);
-  const writes = () => fake.requests.filter((r) => r.method === "PUT").length;
+  const writes = () => fake.published.length;
   const count = writes();
   await cli(first.home, ["webdav", "now"]);
   assert.equal(writes(), count, "Unchanged setup should not create another commit.");
@@ -169,7 +169,12 @@ test("native Magpie: enabled usage sync uploads, imports and skips unchanged usa
   fs.writeFileSync(path.join(second.directory, "usage-computer.json"), JSON.stringify({ id: "fedcba9876543210" }));
   const at = new Date().toISOString();
   const record = { t: at, agent: "codex", provider: "fixture", model: "fixture-model", in: 123, out: 45, status: 200 };
-  fs.writeFileSync(path.join(first.directory, "usage.jsonl"), JSON.stringify(record) + "\n");
+  const records = Array.from({ length: 90 }, (_, i) => {
+    const date = new Date(at);
+    date.setDate(date.getDate() - i);
+    return { ...record, t: date.toISOString() };
+  });
+  fs.writeFileSync(path.join(first.directory, "usage.jsonl"), records.map((r) => JSON.stringify(r) + "\n").join(""));
   const quotas = { "fixture|account": { weekly: [{ at, left: 75 }] } };
   fs.writeFileSync(path.join(first.directory, "quota-history.json"), JSON.stringify(quotas));
   const sync = async (machine) => {
@@ -181,7 +186,7 @@ test("native Magpie: enabled usage sync uploads, imports and skips unchanged usa
   };
   await sync(first);
   const shared = [...fake.files].filter(([name]) => name.endsWith(".magpie-usage"));
-  assert.equal(shared.length, 1);
+  assert.equal(shared.length, 90);
   const [usageName, usageFile] = shared[0];
   const quotaFile = fake.files.get(`backup/magpie/usage/${computer}.magpie-quotas`);
   assert.ok(quotaFile);
@@ -189,8 +194,9 @@ test("native Magpie: enabled usage sync uploads, imports and skips unchanged usa
     assert.equal(JSON.parse(file.bytes).format, "magpie-data");
     assert.equal(file.bytes.includes(Buffer.from("fixture")), false);
   }
-  const writes = () => fake.requests.filter((r) => r.method === "PUT").length;
+  const writes = () => fake.published.length;
   const firstCount = writes();
+  assert.equal(firstCount, 3, "90 daily files share one commit; setup and quota history each have one.");
   await sync(first);
   assert.equal(writes(), firstCount);
   await sync(second);
@@ -200,6 +206,7 @@ test("native Magpie: enabled usage sync uploads, imports and skips unchanged usa
   assert.equal(imported.calls.length, 1);
   assert.equal(imported.calls[0].in, record.in);
   assert.equal(imported.calls[0].out, record.out);
+  assert.equal(fs.readdirSync(path.join(second.directory, "usage-others", computer)).filter((f) => f.endsWith(".json")).length, 90);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(second.directory, "quota-history.json"))), quotas);
   const secondCount = writes();
   await sync(second);

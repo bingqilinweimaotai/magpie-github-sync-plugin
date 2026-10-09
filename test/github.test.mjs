@@ -138,3 +138,42 @@ test("usage listing never silently truncates or accepts malformed versions", asy
   f.entries = [{ type: "file", name: "computer.magpie-quotas", sha: "", size: 1 }];
   await assert.rejects(gh.list("magpie/usage"), /invalid usage/);
 });
+
+test("batch commits keep unrelated concurrent edits and publish only one usage commit", async () => {
+  const f = fakeGitHub();
+  f.branch = "sync/settings";
+  f.put("unrelated.txt", Buffer.from("keep me"));
+  const gh = new GitHub({ ...config(), branch: f.branch }, f.fetch);
+  await gh.prepare();
+  const sha = await gh.blob(dataEnvelope);
+  const count = f.published.length;
+  f.beforeRefUpdate = () => {
+    f.beforeRefUpdate = null;
+    f.put("sync/magpie/usage/another.magpie-usage", dataEnvelope);
+  };
+  await gh.commitUsage(new Map([
+    ["magpie/usage/computer-1.magpie-usage", { sha, before: null }],
+    ["magpie/usage/computer-2.magpie-usage", { sha, before: null }],
+  ]));
+  assert.equal(f.published.length, count + 2); // The concurrent edit plus one published batch.
+  assert.equal(f.published.filter((c) => c.message.startsWith("magpie: sync usage")).length, 1);
+  assert.equal(f.files.get("unrelated.txt").bytes.toString(), "keep me");
+  assert.ok(f.files.has("sync/magpie/usage/another.magpie-usage"));
+  assert.ok(f.files.has("sync/magpie/usage/computer-1.magpie-usage"));
+  assert.ok(f.files.has("sync/magpie/usage/computer-2.magpie-usage"));
+});
+
+test("a concurrent edit to the same usage file is not overwritten", async () => {
+  const f = fakeGitHub();
+  const name = "magpie/usage/computer.magpie-usage";
+  const before = f.put("sync/" + name, Buffer.from("old encrypted version")).sha;
+  const gh = new GitHub(config(), f.fetch);
+  await gh.prepare();
+  const sha = await gh.blob(dataEnvelope);
+  f.beforeRefUpdate = () => {
+    f.beforeRefUpdate = null;
+    f.put("sync/" + name, Buffer.from("another encrypted version"));
+  };
+  await assert.rejects(gh.commitUsage(new Map([[name, { sha, before }]])), (err) => err.status === 412);
+  assert.equal(f.files.get("sync/" + name).bytes.toString(), "another encrypted version");
+});

@@ -2,7 +2,7 @@
 
 将 [Magpie](https://usemagpie.ai) 的加密配置备份到 GitHub 仓库，方便在多台电脑之间同步和恢复，无需修改 Magpie。
 
-这是一个非官方插件，通过 Magpie 的 Bun 插件宿主加载，提供仅监听 `127.0.0.1` 的本地 WebDAV 桥接服务。加密、合并、恢复、撤销和用量共享仍由 Magpie 的同步引擎处理，插件负责将文件操作转换为 GitHub Contents API 请求。
+这是一个非官方插件，通过 Magpie 的 Bun 插件宿主加载，提供仅监听 `127.0.0.1` 的本地 WebDAV 桥接服务。加密、合并、恢复、撤销和用量共享仍由 Magpie 的同步引擎处理，插件负责将文件操作转换为 GitHub Contents 和 Git Data API 请求。
 
 ## 安装
 
@@ -25,7 +25,9 @@ magpie plugin add github:bingqilinweimaotai/magpie-github-sync-plugin
 
 保存前，插件会检查仓库和分支是否可访问；该检查无法保证分支保护规则允许写入。后续同步中的 GitHub 错误会显示在配置页面上。
 
-备份保存在 `<folder>/magpie/magpie.magpie-backup`。可选的加密用量和配额文件保存在 `<folder>/magpie/usage/`。每个发生变化的文件都会生成一次提交，备份内容未变化时不会生成提交。
+备份保存在 `<folder>/magpie/magpie.magpie-backup`。可选的加密用量和配额文件保存在 `<folder>/magpie/usage/`。连续上传的日用量文件通过 Git Data API 合并为一次提交：例如首次补传 90 天用量，日用量部分只生成 1 次提交。设置备份、配额更新和过期文件清理仍单独提交，内容未变化时不会生成提交。
+
+日用量上传先将加密内容保存为远端 Git blob，并将待提交的文件名和版本写入本地 `github-sync-plugin/usage-pending.json`，同时在 `usage-blobs/` 保存加密内容副本，再确认上传。Magpie 上传完日用量后读取用量目录时，桥接服务会先完成批量提交；提交失败会作为用量同步错误返回，暂存记录保留以便重试。连续空闲 15 秒或正常关闭桥接服务时也会提交；重新启动后会从本地加密副本恢复未完成的批次，完成后清理相应副本。同批次反复上传同一文件只保留最后一次内容。批量提交使用最新仓库目录树和普通快进更新，保留其他电脑的修改及现有提交历史。
 
 如果仓库为空，首次备份会初始化默认分支；选择其他分支时，该分支必须已经存在。
 
@@ -65,7 +67,7 @@ npm test
 
 测试使用临时配置档案、真实的本地 HTTP 请求和模拟的 GitHub API，不会读写用户的 Magpie 配置。CI 会在 Windows、Linux 和 macOS 上运行测试套件。
 
-可选集成测试通过 `BUN_BIN` 和 `MAGPIE_HOST` 指定 Bun 与 Magpie 的 `internal/plugin/host.js`，通过 `MAGPIE_BIN` 指定 Magpie 可执行文件。测试会验证宿主接管和插件禁用，以及使用内存中的模拟 GitHub 服务进行原生加密上传、内容未变化时的同步、新配置档案中的恢复与撤销。开启用量同步时，还会验证用量和配额的加密上传、跨配置档案下载合并及内容未变化时不新增提交。用量错误会单独检查同步状态，因为这类错误不会让 CLI 命令失败。测试配置档案均与用户文件隔离。
+可选集成测试通过 `BUN_BIN` 和 `MAGPIE_HOST` 指定 Bun 与 Magpie 的 `internal/plugin/host.js`，通过 `MAGPIE_BIN` 指定 Magpie 可执行文件。测试会验证宿主接管和插件禁用，以及使用内存中的模拟 GitHub 服务进行原生加密上传、内容未变化时的同步、新配置档案中的恢复与撤销。开启用量同步时，还会验证 90 天用量合并为一次提交、配额的加密上传、跨配置档案下载合并及内容未变化时不新增提交。用量错误会单独检查同步状态，因为这类错误不会让 CLI 命令失败。测试配置档案均与用户文件隔离。
 
 Magpie 集成参考：
 

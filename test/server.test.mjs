@@ -7,10 +7,10 @@ import { startBridge } from "../lib/server.mjs";
 import { readState, remoteID } from "../lib/state.mjs";
 import { dataEnvelope, envelope, fakeGitHub } from "./fixture.mjs";
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-github-plugin-test-"));
   const github = fakeGitHub();
-  const server = await startBridge({ directory, port: 0, fetcher: github.fetch });
+  const server = await startBridge({ directory, port: 0, fetcher: github.fetch, ...options });
   const origin = `http://127.0.0.1:${server.address().port}`;
   const page = await (await fetch(origin)).text();
   const csrf = /name="csrf" content="([^"]+)"/.exec(page)[1];
@@ -156,4 +156,98 @@ test("saved state survives restart without replacing the local password", async 
   assert.equal(again.secret, s.password);
   const file = path.join(f.directory, "github-sync-plugin", "state.json");
   if (process.platform !== "win32") assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+});
+
+test("90 sequential daily uploads publish as one commit with readable staged files", async (t) => {
+  const f = await fixture(t);
+  const s = await f.bind();
+  const names = Array.from({ length: 90 }, (_, i) => `magpie/usage/computer-day-${i}.magpie-usage`);
+  let etag;
+  for (const name of names) {
+    const res = await f.dav(s, name, "PUT", {}, dataEnvelope);
+    assert.equal(res.status, 201, await res.text());
+    etag = res.headers.get("etag");
+    const head = await f.dav(s, name, "HEAD");
+    assert.equal(head.headers.get("etag"), etag);
+    assert.equal(head.headers.get("content-length"), String(dataEnvelope.length));
+  }
+  assert.equal(f.github.published.length, 0);
+  assert.deepEqual(Buffer.from(await (await f.dav(s, names[0])).arrayBuffer()), dataEnvelope);
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal(f.github.published.length, 1);
+  assert.equal(f.github.files.size, 90);
+  assert.match(f.github.published[0].message, /90 files/);
+  assert.equal((await f.dav(s, names[0], "HEAD")).headers.get("etag"), etag);
+  assert.equal((await f.dav(s, names[0], "PUT", {}, dataEnvelope)).status, 200);
+  await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" });
+  assert.equal(f.github.published.length, 1);
+});
+
+test("failed publication keeps a journal, blocks config changes and recovers after restart", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const s = await f.bind();
+  const name = "magpie/usage/computer-2026-10-09.magpie-usage";
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 201);
+  f.github.refUpdateError = { status: 403, message: "branch protection prevents this operation" };
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 502);
+  const journal = path.join(f.directory, "github-sync-plugin", "usage-pending.json");
+  const saved = JSON.parse(await fs.readFile(journal, "utf8"));
+  assert.equal(saved.entries.length, 1);
+  assert.equal("token" in saved, false);
+  assert.equal((await f.api("config", { repository: "owner/repo", folder: "other", token: "fixture-token" })).status, 502);
+  assert.equal(readState(f.directory).config.folder, "sync");
+  await new Promise((resolve) => f.server.close(resolve));
+  f.github.blobs.clear(); // Recover even if unreferenced remote blobs were lost.
+  f.github.refUpdateError = null;
+  const restarted = await startBridge({ directory: f.directory, port: 0, fetcher: f.github.fetch });
+  t.after(() => new Promise((resolve) => restarted.close(resolve)));
+  const restored = { ...s, url: `http://127.0.0.1:${restarted.address().port}/dav/${remoteID(readState(f.directory).config)}` };
+  assert.deepEqual(Buffer.from(await (await f.dav(restored, name)).arrayBuffer()), dataEnvelope);
+  assert.equal((await f.dav(restored, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal(f.github.published.length, 1);
+  await assert.rejects(fs.access(journal), { code: "ENOENT" });
+  assert.deepEqual(await fs.readdir(path.join(f.directory, "github-sync-plugin", "usage-blobs")), []);
+});
+
+test("repeated staged updates to new and existing days retain the original remote base", async (t) => {
+  const f = await fixture(t);
+  const s = await f.bind();
+  const created = "magpie/usage/computer-new.magpie-usage";
+  const existing = "magpie/usage/computer-existing.magpie-usage";
+  f.github.put("sync/" + existing, dataEnvelope);
+  const count = f.github.published.length;
+  const data = (text) => Buffer.from(JSON.stringify({ ...JSON.parse(dataEnvelope), data: Buffer.from(text).toString("base64") }));
+  for (const name of [created, existing]) {
+    assert.ok((await f.dav(s, name, "PUT", {}, data("first ciphertext plus tag"))).ok);
+    assert.equal((await f.dav(s, name, "PUT", {}, data("last ciphertext plus tag"))).status, 200);
+  }
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal(f.github.published.length, count + 1);
+  for (const name of [created, existing]) assert.deepEqual(f.github.files.get("sync/" + name).bytes, data("last ciphertext plus tag"));
+  assert.deepEqual(await fs.readdir(path.join(f.directory, "github-sync-plugin", "usage-blobs")), []);
+});
+
+test("a lost publication response retries without another commit", async (t) => {
+  const f = await fixture(t);
+  const s = await f.bind();
+  await f.dav(s, "magpie/usage/computer-2026-10-09.magpie-usage", "PUT", {}, dataEnvelope);
+  f.github.afterRefUpdate = () => {
+    f.github.afterRefUpdate = null;
+    throw new Error("connection lost after publication");
+  };
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 502);
+  assert.equal(f.github.published.length, 1);
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal(f.github.published.length, 1);
+});
+
+test("interrupted uploads flush after idle and graceful close", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 40 });
+  const s = await f.bind();
+  await f.dav(s, "magpie/usage/computer-first.magpie-usage", "PUT", {}, dataEnvelope);
+  for (let i = 0; i < 100 && !f.github.published.length; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(f.github.published.length, 1);
+  await f.dav(s, "magpie/usage/computer-second.magpie-usage", "PUT", {}, dataEnvelope);
+  await new Promise((resolve) => f.server.close(resolve));
+  assert.equal(f.github.published.length, 2);
 });
