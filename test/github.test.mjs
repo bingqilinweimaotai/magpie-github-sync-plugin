@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BridgeError, GitHub, MAX_FILE, normalizeConfig, readLimited } from "../lib/github.mjs";
-import { envelope, fakeGitHub } from "./fixture.mjs";
+import { dataEnvelope, envelope, fakeGitHub } from "./fixture.mjs";
 
 const config = () => normalizeConfig({ repository: "owner/repo", folder: "sync", token: "fixture-token" });
 
@@ -129,7 +129,7 @@ test("malformed metadata, base64, sizes and failed body reads fail closed", asyn
 
 test("usage listing never silently truncates or accepts malformed versions", async () => {
   const f = fakeGitHub();
-  f.put("sync/magpie/usage/computer-2026-10-09.magpie-usage", envelope);
+  f.put("sync/magpie/usage/computer-2026-10-09.magpie-usage", dataEnvelope);
   const gh = new GitHub(config(), f.fetch);
   await gh.prepare();
   assert.equal((await gh.list("magpie/usage")).length, 1);

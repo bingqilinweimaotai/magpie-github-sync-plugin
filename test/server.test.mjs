@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { startBridge } from "../lib/server.mjs";
 import { readState, remoteID } from "../lib/state.mjs";
-import { envelope, fakeGitHub } from "./fixture.mjs";
+import { dataEnvelope, envelope, fakeGitHub } from "./fixture.mjs";
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-github-plugin-test-"));
@@ -83,18 +83,32 @@ test("usage and quota files support overwrite, DAV listing, read and removal", a
   const s = await f.bind();
   const name = "magpie/usage/computer-2026-10-09.magpie-usage";
   const quota = "magpie/usage/computer.magpie-quotas";
-  assert.equal((await f.dav(s, name, "PUT", {}, envelope)).status, 201);
-  assert.equal((await f.dav(s, name, "PUT", {}, envelope)).status, 200);
-  assert.equal((await f.dav(s, quota, "PUT", {}, envelope)).status, 201);
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 201);
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 200);
+  assert.equal((await f.dav(s, quota, "PUT", {}, dataEnvelope)).status, 201);
   const listing = await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" });
   assert.equal(listing.status, 207);
   const text = await listing.text();
   assert.ok(text.includes("<D:collection/>"));
   assert.ok(text.includes("computer-2026-10-09.magpie-usage"));
   assert.ok(text.includes("computer.magpie-quotas"));
-  assert.deepEqual(Buffer.from(await (await f.dav(s, name)).arrayBuffer()), envelope);
+  assert.deepEqual(Buffer.from(await (await f.dav(s, name)).arrayBuffer()), dataEnvelope);
   assert.equal((await f.dav(s, name, "DELETE")).status, 204);
   assert.equal((await f.dav(s, name)).status, 404);
+});
+
+test("sealed formats must match backup, usage and quota paths", async (t) => {
+  const f = await fixture(t);
+  const s = await f.bind();
+  const backup = "magpie/magpie.magpie-backup";
+  const usage = "magpie/usage/computer-2026-10-09.magpie-usage";
+  const quota = "magpie/usage/computer.magpie-quotas";
+  const newer = Buffer.from(JSON.stringify({ ...JSON.parse(dataEnvelope), version: 2 }));
+  for (const [name, body] of [[backup, dataEnvelope], [usage, envelope], [quota, envelope],
+    [usage, Buffer.from("{}")], [quota, Buffer.from("{}")], [usage, newer]]) {
+    assert.equal((await f.dav(s, name, "PUT", {}, body)).status, 400);
+  }
+  assert.equal(f.github.requests.filter((r) => r.method === "PUT").length, 0);
 });
 
 test("wrong token, missing branch and failed reads never look like a missing backup", async (t) => {

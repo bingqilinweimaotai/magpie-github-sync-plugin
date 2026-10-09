@@ -6,6 +6,11 @@ export const envelope = Buffer.from(JSON.stringify({
   data: Buffer.from("fixture ciphertext plus authentication tag").toString("base64"),
 }));
 
+// Usage days and quota history use backup.SealData, not backup.Seal.
+export const dataEnvelope = Buffer.from(JSON.stringify({
+  ...JSON.parse(envelope), format: "magpie-data",
+}));
+
 export function fakeGitHub() {
   const f = {
     files: new Map(), blobs: new Map(), requests: [], empty: false,

@@ -115,9 +115,7 @@ function cli(home, args) {
   });
 }
 
-test("native Magpie: encrypted upload, unchanged sync, restore and undo in a fresh profile", {
-  skip: !process.env.MAGPIE_BIN, timeout: 60000,
-}, async (t) => {
+async function nativeFixture(t, usage = false) {
   const base = temporary(t);
   const fake = fakeGitHub();
   fake.empty = true;
@@ -133,11 +131,17 @@ test("native Magpie: encrypted upload, unchanged sync, restore and undo in a fre
     fs.writeFileSync(path.join(directory, "sync.json"), JSON.stringify({
       url: `http://127.0.0.1:${server.address().port}/dav/${remoteID(config)}`,
       user: "magpie-sync", password: readState(directory).secret, passphrase: "integration-passphrase",
-      keys: true, agents: false, library: false,
+      keys: true, agents: false, library: false, usage,
     }));
     machines.push({ home, directory });
   }
-  const [first, second] = machines;
+  return { fake, machines };
+}
+
+test("native Magpie: encrypted upload, unchanged sync, restore and undo in a fresh profile", {
+  skip: !process.env.MAGPIE_BIN, timeout: 60000,
+}, async (t) => {
+  const { fake, machines: [first, second] } = await nativeFixture(t);
   const settingsFile = (machine) => path.join(machine.directory, "settings.json");
   fs.writeFileSync(settingsFile(first), JSON.stringify({ theme: "dark", language: "en" }));
   fs.writeFileSync(settingsFile(second), JSON.stringify({ theme: "light", language: "en" }));
@@ -154,4 +158,50 @@ test("native Magpie: encrypted upload, unchanged sync, restore and undo in a fre
   assert.equal(JSON.parse(fs.readFileSync(settingsFile(second))).theme, "dark");
   await cli(second.home, ["webdav", "undo"]);
   assert.equal(JSON.parse(fs.readFileSync(settingsFile(second))).theme, "light");
+});
+
+test("native Magpie: enabled usage sync uploads, imports and skips unchanged usage and quotas", {
+  skip: !process.env.MAGPIE_BIN, timeout: 60000,
+}, async (t) => {
+  const { fake, machines: [first, second] } = await nativeFixture(t, true);
+  const computer = "0123456789abcdef";
+  fs.writeFileSync(path.join(first.directory, "usage-computer.json"), JSON.stringify({ id: computer }));
+  fs.writeFileSync(path.join(second.directory, "usage-computer.json"), JSON.stringify({ id: "fedcba9876543210" }));
+  const at = new Date().toISOString();
+  const record = { t: at, agent: "codex", provider: "fixture", model: "fixture-model", in: 123, out: 45, status: 200 };
+  fs.writeFileSync(path.join(first.directory, "usage.jsonl"), JSON.stringify(record) + "\n");
+  const quotas = { "fixture|account": { weekly: [{ at, left: 75 }] } };
+  fs.writeFileSync(path.join(first.directory, "quota-history.json"), JSON.stringify(quotas));
+  const sync = async (machine) => {
+    await cli(machine.home, ["webdav", "now"]);
+    // Usage errors are saved separately; the CLI can exit successfully despite one.
+    const state = JSON.parse(fs.readFileSync(path.join(machine.directory, "sync-state.json")));
+    assert.ok(state.usage);
+    assert.equal(state.usage.error ?? "", "", state.usage.error);
+  };
+  await sync(first);
+  const shared = [...fake.files].filter(([name]) => name.endsWith(".magpie-usage"));
+  assert.equal(shared.length, 1);
+  const [usageName, usageFile] = shared[0];
+  const quotaFile = fake.files.get(`backup/magpie/usage/${computer}.magpie-quotas`);
+  assert.ok(quotaFile);
+  for (const file of [usageFile, quotaFile]) {
+    assert.equal(JSON.parse(file.bytes).format, "magpie-data");
+    assert.equal(file.bytes.includes(Buffer.from("fixture")), false);
+  }
+  const writes = () => fake.requests.filter((r) => r.method === "PUT").length;
+  const firstCount = writes();
+  await sync(first);
+  assert.equal(writes(), firstCount);
+  await sync(second);
+  const day = path.basename(usageName).slice(computer.length + 1, -".magpie-usage".length);
+  const imported = JSON.parse(fs.readFileSync(path.join(second.directory, "usage-others", computer, day + ".json")));
+  assert.equal(imported.computer, computer);
+  assert.equal(imported.calls.length, 1);
+  assert.equal(imported.calls[0].in, record.in);
+  assert.equal(imported.calls[0].out, record.out);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(second.directory, "quota-history.json"))), quotas);
+  const secondCount = writes();
+  await sync(second);
+  assert.equal(writes(), secondCount);
 });
