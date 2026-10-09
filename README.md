@@ -25,7 +25,7 @@ magpie plugin add github:bingqilinweimaotai/magpie-github-sync-plugin
 
 保存前，插件会检查仓库和分支是否可访问；该检查无法保证分支保护规则允许写入。后续同步中的 GitHub 错误会显示在配置页面上。
 
-备份保存在 `<folder>/magpie/magpie.magpie-backup`，与拟议的原生 GitHub 同步后端使用相同的目录布局。可选的加密用量和配额文件保存在 `<folder>/magpie/usage/`。每个发生变化的文件都会生成一次提交，备份内容未变化时不会生成提交。
+备份保存在 `<folder>/magpie/magpie.magpie-backup`。可选的加密用量和配额文件保存在 `<folder>/magpie/usage/`。每个发生变化的文件都会生成一次提交，备份内容未变化时不会生成提交。
 
 如果仓库为空，首次备份会初始化默认分支；选择其他分支时，该分支必须已经存在。
 
@@ -43,7 +43,7 @@ magpie plugin add github:bingqilinweimaotai/magpie-github-sync-plugin
 - 禁用或移除插件后，监听服务会在约两秒内关闭，已开始的操作会执行完毕。原有同步设置会保留；如果不再使用同步，还需关闭 WebDAV 同步。
 - 不同配置档案需要使用不同端口。可运行 `magpie plugin options magpie-github-sync-plugin '{"port":3438}'`，然后访问 `http://127.0.0.1:3438/`。在 PowerShell 中，将 JSON 作为一个用单引号包裹的参数传入。
 - 修改仓库、分支或文件夹后，生成的 WebDAV 地址也会变化，需要更新 Magpie 同步页面中的地址。旧地址会报错，以免意外访问其他仓库。
-- WebDAV 与 S3 之间的切换沿用 Magpie 原有实现；插件不会添加原生 GitHub 同步 PR 中的三后端配置选择器。
+- WebDAV 与 S3 之间的切换沿用 Magpie 原有实现；插件不会添加原生 GitHub 同步的三后端配置选择器。
 
 ## 凭据与错误处理
 
