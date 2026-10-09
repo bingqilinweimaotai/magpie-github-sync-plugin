@@ -1,134 +1,79 @@
-# Magpie GitHub sync plugin
+# Magpie GitHub 同步插件
 
-Keep Magpie's encrypted setup in a GitHub repository without patching Magpie.
+将 [Magpie](https://usemagpie.ai) 的加密配置备份到 GitHub 仓库，方便在多台电脑之间同步和恢复，无需修改 Magpie。
 
-This is an unofficial plugin. It loads through Magpie's Bun plugin host and
-provides a WebDAV bridge bound only to `127.0.0.1`. Magpie's existing sync
-engine still owns encryption, merging, restore, undo, and usage sharing.
-The bridge translates file operations to GitHub's Contents API.
+这是一个非官方插件，通过 Magpie 的 Bun 插件宿主加载，提供仅监听 `127.0.0.1` 的本地 WebDAV 桥接服务。加密、合并、恢复、撤销和用量共享仍由 Magpie 的同步引擎处理，插件负责将文件操作转换为 GitHub Contents API 请求。
 
-## Install
+## 安装
 
-In **Settings > Plugins > Discover > Unofficial plugins · GitHub**, look for
-`magpie-github-sync-plugin` and install it. Its repository carries the
-`magpie-plugin` GitHub topic. Discovery depends on GitHub search indexing and
-Magpie's cache: newer versions refresh about every ten minutes; older versions
-may keep a six-hour cache.
+在 Magpie 的 **设置 → 插件 → 发现 → 非官方插件 · GitHub** 中搜索并安装 `magpie-github-sync-plugin`。仓库已添加 `magpie-plugin` 主题标签；能否在发现页中看到它，取决于 GitHub 搜索索引和 Magpie 缓存。较新版本约每十分钟刷新一次，旧版本可能缓存六小时。
 
-You can install immediately from the repository instead:
+也可以直接从 GitHub 仓库安装：
 
 ```sh
 magpie plugin add github:bingqilinweimaotai/magpie-github-sync-plugin
 ```
 
-Open **Settings > Plugins** so Magpie loads the plugin. Keep the app, `magpie web`,
-or the gateway running. The plugin needs Magpie's Bun host; there is no
-separate Node installation, build step, npm publication, or install script.
+安装后打开 **设置 → 插件**，让 Magpie 加载插件，并保持 Magpie 应用、`magpie web` 或网关运行。插件使用 Magpie 自带的 Bun 宿主，无需单独安装 Node.js、构建项目或运行安装脚本，也无需发布到 npm。
 
-## Bind a repository
+## 配置仓库
 
-1. Open **http://127.0.0.1:3437/** while Magpie is running.
-2. Enter an existing GitHub repository (`owner/repo`), optional branch and
-   folder, and a token with **Contents: read and write** for that repository.
-   A private backup repository is recommended. Save the configuration.
-3. The page gives you a local **Address**, **User name**, and **Local password**.
-   Enter them under **Settings > Sync > WebDAV** in Magpie.
-4. Choose an encryption passphrase, different from both the GitHub token
-   and the local password. Select which parts to sync and save.
+1. 保持 Magpie 运行，在浏览器中打开 [http://127.0.0.1:3437/](http://127.0.0.1:3437/)。
+2. 填写已有的 GitHub 仓库（`owner/repo`），按需填写分支和文件夹，并提供对该仓库拥有 **Contents: read and write** 权限的 GitHub Token。建议使用私有仓库存放备份，然后保存配置。
+3. 页面会生成本地桥接服务的地址（**Address**）、用户名（**User name**）和本地密码（**Local password**）。将它们填入 Magpie 的 **设置 → 同步 → WebDAV**。
+4. 设置加密口令，选好需要同步的内容并保存。加密口令应与 GitHub Token 和本地密码不同。
 
-The bridge checks repository and branch access before saving. This check
-does not prove that a branch protection rule will permit writes. Any later
-GitHub error is shown on the setup page.
+保存前，插件会检查仓库和分支是否可访问；该检查无法保证分支保护规则允许写入。后续同步中的 GitHub 错误会显示在配置页面上。
 
-The backup is `<folder>/magpie/magpie.magpie-backup`, matching the layout of
-the proposed native GitHub backend. Optional encrypted usage and quota files
-are under `<folder>/magpie/usage/`. Each changed file creates a commit.
-An unchanged backup does not create a commit.
+备份保存在 `<folder>/magpie/magpie.magpie-backup`，与拟议的原生 GitHub 同步后端使用相同的目录布局。可选的加密用量和配额文件保存在 `<folder>/magpie/usage/`。每个发生变化的文件都会生成一次提交，备份内容未变化时不会生成提交。
 
-An empty repository is initialized on its default branch by the first backup.
-Other selected branches must already exist.
+如果仓库为空，首次备份会初始化默认分支；选择其他分支时，该分支必须已经存在。
 
-## Restore on another computer
+## 在另一台电脑上恢复
 
-Install this plugin there, bind the **same repository, branch and folder**,
-then configure WebDAV using that computer's generated bridge credentials.
-Use the **same encryption passphrase and inclusion switches** in Magpie.
-Click **Restore**. Magpie retains the displaced local setup for **Undo**.
-Automatic and manual sync work through Magpie's existing controls.
+在另一台电脑上安装插件，绑定 **相同的仓库、分支和文件夹**，再使用这台电脑生成的桥接凭据配置 WebDAV。在 Magpie 中使用 **相同的加密口令和同步内容选项**，点击 **恢复（Restore）** 即可。Magpie 会保留被替换的本地配置，供 **撤销（Undo）** 使用。自动同步和手动同步均通过 Magpie 原有的操作入口完成。
 
-The local password can differ between computers. The plugin never receives
-the encryption passphrase. Magpie's own backup rules determine which
-providers, keys, settings, profiles, agent models and library data are portable.
-This does not clone a working directory or copy all machine-local files.
+不同电脑的本地密码可以不同，插件不会接收加密口令。哪些供应商、密钥、设置、配置档案、Agent 模型和资料库数据可以迁移，由 Magpie 的备份规则决定；同步范围不包括克隆工作目录或复制电脑上的所有本地文件。
 
-## Compatibility and lifecycle
+## 兼容性与运行方式
 
-- This is a bridge, not a new entry in Magpie's native backend selector.
-  The Sync page identifies it as WebDAV. The Plugins page may label it as
-  a provider because it has no separate background-service category;
-  this plugin adds no models or fake provider account.
-- Plugin initialization starts the bridge. The native sync API does not
-  initialize plugins itself; open Plugins first if a CLI-only sync reports
-  connection refused.
-- Multiple Magpie/CLI hosts for the same profile share the bridge.
-  The remaining host takes over within about two seconds if its owner exits.
-  A sync during that gap may need a retry.
-- Disabling or removing the plugin closes its listener within about two
-  seconds; already active operations finish. Existing native sync settings
-  remain, so switch off WebDAV sync too if it is no longer wanted.
-- A different profile needs another port. Set it with
-  `magpie plugin options magpie-github-sync-plugin '{"port":3438}'`, then use
-  `http://127.0.0.1:3438/`. In PowerShell, pass JSON as a single quoted argument.
-- Changing repository, branch or folder changes the generated WebDAV
-  address. Update the native Sync form to the new address. Old addresses
-  fail instead of silently accessing another repository.
-- Existing WebDAV/S3 switching works as Magpie implements it. This plugin
-  does not add the native PR's three-backend configuration selector.
+- 插件通过 WebDAV 桥接，同步页面中仍显示为 WebDAV，不会新增原生同步后端选项。由于插件页面没有独立的后台服务分类，它可能将此插件标为供应商；插件本身不会添加模型或虚拟供应商账号。
+- 插件初始化时会启动桥接服务。原生同步 API 不会自行初始化插件；如果仅通过 CLI 同步时提示连接被拒绝，请先打开插件页面。
+- 同一配置档案下的多个 Magpie 或 CLI 宿主会共享桥接服务。持有服务的宿主退出后，其他宿主会在约两秒内接管；在此期间发起的同步可能需要重试。
+- 禁用或移除插件后，监听服务会在约两秒内关闭，已开始的操作会执行完毕。原有同步设置会保留；如果不再使用同步，还需关闭 WebDAV 同步。
+- 不同配置档案需要使用不同端口。可运行 `magpie plugin options magpie-github-sync-plugin '{"port":3438}'`，然后访问 `http://127.0.0.1:3438/`。在 PowerShell 中，将 JSON 作为一个用单引号包裹的参数传入。
+- 修改仓库、分支或文件夹后，生成的 WebDAV 地址也会变化，需要更新 Magpie 同步页面中的地址。旧地址会报错，以免意外访问其他仓库。
+- WebDAV 与 S3 之间的切换沿用 Magpie 原有实现；插件不会添加原生 GitHub 同步 PR 中的三后端配置选择器。
 
-## Credentials and errors
+## 凭据与错误处理
 
-Configuration and a separate local bridge password live in
-`<magpie-config>/github-sync-plugin/state.json`. On POSIX this file is mode
-`0600`; on Windows it inherits the user's configuration directory ACLs.
-The file is not part of the encrypted remote backup. Configure credentials
-separately on each computer.
+配置和独立的本地桥接密码保存在 `<magpie-config>/github-sync-plugin/state.json`。在 POSIX 系统上，该文件权限为 `0600`；在 Windows 上，继承用户配置目录的访问控制权限（ACL）。该文件不包含在远程加密备份中，每台电脑都需要单独配置凭据。
 
-The token is sent only to `https://api.github.com`; redirects are refused.
-Leaving the token blank reuses it only for the same repository. Existing
-tokens never return to the setup form. Local configuration requires a
-same-origin CSRF token; DAV access requires the local bridge password.
+GitHub Token 只会发送到 `https://api.github.com`，插件拒绝重定向。仅在仓库未改变时，将 Token 留空才会复用已保存的 Token；已保存的 Token 不会回填到配置表单。本地配置请求需要同源 CSRF Token，WebDAV 访问需要本地桥接密码。
 
-Conditional writes use blob SHAs and return a precondition failure when
-another computer changes the backup, so Magpie can read and merge again.
-Missing repositories and branches, malformed metadata, failed reads and
-authentication failures are not treated as missing backups. Rate limits
-are passed back to Magpie's sync backoff.
+写入时通过 blob SHA 检查文件版本。如果另一台电脑已修改备份，插件会返回前置条件失败，让 Magpie 重新读取并合并。仓库或分支不存在、元数据格式错误、读取失败和认证失败都会明确报错，不会被当作备份不存在处理。GitHub 限流信息会传回 Magpie，由其同步退避机制处理。
 
-The bridge accepts only sealed Magpie version 1 backup and usage files,
-up to 64 MiB each. Usage listings reaching GitHub's 1,000-entry limit fail
-explicitly. Repository history retains previous encrypted versions.
+桥接服务仅接受已加密封装的 Magpie v1 备份和用量文件，单个文件最大为 64 MiB。用量目录列表达到 GitHub 的 1,000 条上限时会明确报错。仓库提交历史会保留之前的加密版本。
 
-## Development
+## 开发与测试
 
-No runtime dependencies:
+插件没有运行时依赖，可使用以下命令运行测试：
 
 ```sh
 npm test
 ```
 
-Tests use temporary profiles, real local HTTP requests and GitHub API
-fixtures. They never read or write the user's Magpie configuration.
-The CI matrix runs the suite on Windows, Linux and macOS.
+测试使用临时配置档案、真实的本地 HTTP 请求和模拟的 GitHub API，不会读写用户的 Magpie 配置。CI 会在 Windows、Linux 和 macOS 上运行测试套件。
 
-Optional integration tests run when `BUN_BIN` and `MAGPIE_HOST` point to
-Bun and Magpie's `internal/plugin/host.js`, and when `MAGPIE_BIN` points
-to a Magpie executable. They verify host takeover and disable, then native
-encrypted upload, unchanged sync, fresh-profile restore and undo against
-an in-memory GitHub fixture. Both profiles are isolated from user files.
+可选集成测试通过 `BUN_BIN` 和 `MAGPIE_HOST` 指定 Bun 与 Magpie 的 `internal/plugin/host.js`，通过 `MAGPIE_BIN` 指定 Magpie 可执行文件。测试会验证宿主接管和插件禁用，以及使用内存中的模拟 GitHub 服务进行原生加密上传、内容未变化时的同步、新配置档案中的恢复与撤销。测试配置档案均与用户文件隔离。
 
-Magpie integration references:
+Magpie 集成参考：
 
-- [Plugin guide](https://usemagpie.ai/docs/plugins)
-- [Plugin host](https://github.com/yetone/magpie/blob/main/internal/plugin/host.js)
-- [GitHub discovery](https://github.com/yetone/magpie/blob/main/internal/plugin/github.go)
-- [Native WebDAV sync](https://github.com/yetone/magpie/blob/main/internal/davsync/dav.go)
+- [插件指南](https://usemagpie.ai/docs/plugins)
+- [插件宿主](https://github.com/yetone/magpie/blob/main/internal/plugin/host.js)
+- [GitHub 插件发现](https://github.com/yetone/magpie/blob/main/internal/plugin/github.go)
+- [原生 WebDAV 同步](https://github.com/yetone/magpie/blob/main/internal/davsync/dav.go)
+
+## License
+
+[MIT](LICENSE)
