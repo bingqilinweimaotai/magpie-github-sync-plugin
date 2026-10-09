@@ -23,6 +23,8 @@ magpie plugin add github:bingqilinweimaotai/magpie-github-sync-plugin
 3. 页面会生成本地桥接服务的地址（**Address**）、用户名（**User name**）和本地密码（**Local password**）。将它们填入 Magpie 的 **设置 → 同步 → WebDAV**。
 4. 设置加密口令，选好需要同步的内容并保存。加密口令应与 GitHub Token 和本地密码不同。
 
+配置页右上角可切换 **中文 / English**。首次打开时跟随浏览器语言，之后会在当前浏览器中记住选择；切换语言不会清空正在填写的内容。
+
 保存前，插件会检查仓库和分支是否可访问；该检查无法保证分支保护规则允许写入。后续同步中的 GitHub 错误会显示在配置页面上。
 
 备份保存在 `<folder>/magpie/magpie.magpie-backup`。可选的加密用量和配额文件保存在 `<folder>/magpie/usage/`。连续上传的日用量文件通过 Git Data API 合并为一次提交：例如首次补传 90 天用量，日用量部分只生成 1 次提交。设置备份、配额更新和过期文件清理仍单独提交，内容未变化时不会生成提交。
