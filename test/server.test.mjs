@@ -126,6 +126,113 @@ test("wrong token, missing branch and failed reads never look like a missing bac
   assert.match(status.lastError, /rate limited/);
 });
 
+test("saving config and retrying pending uploads respect the rate-limit cooldown", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const s = await f.bind();
+  const name = "magpie/usage/computer-2026-10-09.magpie-usage";
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 201);
+  f.github.status = 403;
+  const limited = await f.api("usage/retry", {});
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "120");
+  const requests = f.github.requests.length;
+  f.github.status = 0;
+  const config = { repository: "owner/repo", folder: "sync", token: "" };
+  for (const token of ["", "fixture-token", "replacement-token"]) {
+    const save = await f.api("config", { ...config, token });
+    assert.equal(save.status, 429);
+    assert.ok(Number(save.headers.get("retry-after")) > 0);
+  }
+  assert.equal((await f.api("usage/retry", {})).status, 429);
+  assert.equal(f.github.requests.length, requests);
+  assert.equal(readState(f.directory).config.token, "fixture-token");
+  assert.equal((await (await f.api("status")).json()).pending.count, 1);
+  const afterCooldown = Date.now() + 121000;
+  t.mock.method(Date, "now", () => afterCooldown);
+  assert.equal((await f.api("config", config)).status, 200);
+  assert.equal((await f.api("usage/retry", {})).status, 200);
+  assert.deepEqual(f.github.files.get("sync/" + name).bytes, dataEnvelope);
+});
+
+test("a pending upload does not block replacing an expired token", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const old = await f.bind({ token: "old-fixture" });
+  const name = "magpie/usage/computer-2026-10-09.magpie-usage";
+  assert.equal((await f.dav(old, name, "PUT", {}, dataEnvelope)).status, 201);
+  f.github.rejectedTokens.add("Bearer old-fixture");
+  assert.equal((await f.api("usage/retry", {})).status, 502);
+  const replacement = await f.api("config", { repository: "owner/repo", folder: "sync", token: "new-fixture" });
+  assert.equal(replacement.status, 200, await replacement.text());
+  assert.equal(readState(f.directory).config.token, "new-fixture");
+  assert.equal((await f.dav(old, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal(f.github.published.length, 1);
+});
+
+test("usage conflicts are visible, readable from remote, and can be resolved", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const s = await f.bind();
+  const name = "magpie/usage/computer-2026-10-09.magpie-usage";
+  const remote = Buffer.from(JSON.stringify({ ...JSON.parse(dataEnvelope), data: Buffer.from("remote").toString("base64") }));
+  f.github.put("sync/" + name, remote);
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 200);
+  const changed = Buffer.from(JSON.stringify({ ...JSON.parse(dataEnvelope), data: Buffer.from("other").toString("base64") }));
+  f.github.put("sync/" + name, changed);
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 412);
+  let status = await (await f.api("status")).json();
+  assert.equal(status.lastErrorCode, "conflict");
+  assert.equal(status.pending.files[0].conflict, true);
+  const pending = status.pending.files[0];
+  const journal = path.join(f.directory, "github-sync-plugin", "usage-pending.json");
+  const saved = await fs.readFile(journal, "utf8");
+  const read = await f.dav(s, name);
+  assert.deepEqual(Buffer.from(await read.arrayBuffer()), changed);
+  const blobs = f.github.requests.filter((r) => r.method === "POST" && r.url.pathname.endsWith("/git/blobs")).length;
+  for (const bytes of [dataEnvelope, remote, changed]) {
+    assert.equal((await f.dav(s, name, "PUT", {}, bytes)).status, 412);
+  }
+  assert.deepEqual((await (await f.api("status")).json()).pending.files[0], pending);
+  assert.equal(await fs.readFile(journal, "utf8"), saved);
+  assert.equal(f.github.requests.filter((r) => r.method === "POST" && r.url.pathname.endsWith("/git/blobs")).length, blobs);
+  assert.deepEqual(f.github.files.get("sync/" + name).bytes, changed);
+  const exported = await f.api("usage/export/" + pending.sha);
+  assert.equal(exported.status, 200);
+  assert.deepEqual(Buffer.from(await exported.arrayBuffer()), dataEnvelope);
+  const resolve = await f.api("usage/resolve", { name, sha: pending.sha });
+  assert.equal(resolve.status, 200, await resolve.text());
+  status = await (await f.api("status")).json();
+  assert.equal(status.pending.count, 0);
+  assert.equal(status.pending.archives.length, 1);
+  assert.equal(status.lastError, "");
+  assert.equal(status.diagnostics.write, "unverified");
+  assert.equal(status.diagnostics.writeError, "");
+  assert.equal((await f.dav(s, name)).status, 200);
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 200);
+  assert.equal((await f.api("usage/retry", {})).status, 200);
+  assert.deepEqual(f.github.files.get("sync/" + name).bytes, dataEnvelope);
+  assert.deepEqual(Buffer.from(await (await f.api("usage/export/" + pending.sha)).arrayBuffer()), dataEnvelope);
+});
+
+for (const operation of ["read", "publish"]) {
+  test(`resolving a conflict preserves a later ${operation} authentication failure`, async (t) => {
+    const f = await fixture(t, { batchIdleMs: 60000 });
+    const s = await f.bind();
+    const name = "magpie/usage/computer-2026-10-09.magpie-usage";
+    assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 201);
+    f.github.put("sync/" + name, Buffer.from(JSON.stringify({ ...JSON.parse(dataEnvelope), data: "b3RoZXI=" })));
+    assert.equal((await f.api("usage/retry", {})).status, 412);
+    const status = await (await f.api("status")).json();
+    f.github.status = 401;
+    const failure = operation === "read" ? await f.dav(s, name) : await f.api("usage/retry", {});
+    assert.equal(failure.status, 502);
+    assert.equal((await f.api("usage/resolve", { name, sha: status.pending.files[0].sha })).status, 200);
+    const resolved = await (await f.api("status")).json();
+    assert.equal(resolved.pending.count, 0);
+    assert.equal(resolved.lastErrorCode, "authentication");
+    assert.equal(resolved.diagnostics.write, operation === "read" ? "unverified" : "failed");
+    assert.match(resolved.diagnostics.writeError, operation === "read" ? /^$/ : /401/);
+  });
+}
+
 test("repository identity includes branch and folder; credentials cannot cross repositories", async (t) => {
   const f = await fixture(t);
   const s = await f.bind();
@@ -161,6 +268,7 @@ test("saved state survives restart without replacing the local password", async 
 test("90 sequential daily uploads publish as one commit with readable staged files", async (t) => {
   const f = await fixture(t);
   const s = await f.bind();
+  const requestsAfterBind = f.github.requests.length;
   const names = Array.from({ length: 90 }, (_, i) => `magpie/usage/computer-day-${i}.magpie-usage`);
   let etag;
   for (const name of names) {
@@ -172,6 +280,7 @@ test("90 sequential daily uploads publish as one commit with readable staged fil
     assert.equal(head.headers.get("content-length"), String(dataEnvelope.length));
   }
   assert.equal(f.github.published.length, 0);
+  assert.ok(f.github.requests.length - requestsAfterBind < 150, "daily uploads should reuse the remote usage snapshot");
   assert.deepEqual(Buffer.from(await (await f.dav(s, names[0])).arrayBuffer()), dataEnvelope);
   assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
   assert.equal(f.github.published.length, 1);

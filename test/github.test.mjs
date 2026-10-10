@@ -133,10 +133,31 @@ test("usage listing never silently truncates or accepts malformed versions", asy
   const gh = new GitHub(config(), f.fetch);
   await gh.prepare();
   assert.equal((await gh.list("magpie/usage")).length, 1);
-  f.entries = Array(1000).fill({});
-  await assert.rejects(gh.list("magpie/usage"), /1,000/);
+  f.entries = {};
+  await assert.rejects(gh.list("magpie/usage"), /invalid usage listing/);
   f.entries = [{ type: "file", name: "computer.magpie-quotas", sha: "", size: 1 }];
   await assert.rejects(gh.list("magpie/usage"), /invalid usage/);
+});
+
+test("large usage directories use pinned nonrecursive trees and reject truncated or malformed trees", async () => {
+  const f = fakeGitHub();
+  for (let i = 0; i < 1005; i++) f.put(`sync/magpie/usage/device-${i}.magpie-usage`, dataEnvelope);
+  f.put("unrelated/keep.txt", envelope);
+  const gh = new GitHub(config(), f.fetch);
+  await gh.prepare();
+  const head = f.head;
+  f.put("sync/magpie/usage/later.magpie-usage", dataEnvelope);
+  const files = await gh.list("magpie/usage", head);
+  assert.equal(files.length, 1005);
+  assert.equal(files.some((e) => e.name === "later.magpie-usage"), false);
+  assert.equal(files.every((e) => e.encoding === "none"), true);
+  assert.ok(f.requests.some((r) => r.url.pathname.includes("/git/trees/")));
+  assert.equal(f.requests.some((r) => r.url.searchParams.has("recursive")), false);
+  f.treeTruncated = true;
+  await assert.rejects(gh.list("magpie/usage", head), /truncated usage tree/);
+  f.treeTruncated = false;
+  f.treeEntries = [{ path: "../escape", type: "tree", mode: "040000", sha: "a".repeat(40) }];
+  await assert.rejects(gh.list("magpie/usage", head), /invalid or truncated/);
 });
 
 test("batch commits keep unrelated concurrent edits and publish only one usage commit", async () => {

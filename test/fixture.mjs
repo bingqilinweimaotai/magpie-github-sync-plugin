@@ -18,6 +18,7 @@ export function fakeGitHub() {
     branch: "main", status: 0, refStatus: 0, refMessage: "", failPut: null,
     encoding: "base64", readStatus: 0, entries: null,
     trees: new Map(), commits: new Map(), published: [], beforeRefUpdate: null, afterRefUpdate: null, refUpdateError: null,
+    rejectedTokens: new Set(), treeTruncated: false, treeEntries: null,
   };
   const hash = (text) => createHash("sha1").update(text).digest("hex");
   const treeOf = (files) => {
@@ -54,6 +55,7 @@ export function fakeGitHub() {
     if (options.redirect !== "manual") throw new Error("Unsafe redirect policy");
     f.requests.push({ url, ...options });
     const reply = (status, data, headers = {}) => new Response(JSON.stringify(data), { status, headers });
+    if (f.rejectedTokens.has(options.headers.Authorization)) return reply(401, { message: "Bad credentials" });
     if (f.status) return reply(f.status, { message: "repository access refused" },
       f.status === 403 ? { "X-RateLimit-Remaining": "0", "Retry-After": "120" } : {});
     const suffix = decodeURIComponent(url.pathname).replace(/^\/repos\/owner\/repo\/?/, "");
@@ -78,6 +80,23 @@ export function fakeGitHub() {
     if (suffix.startsWith("git/commits/") && options.method === "GET") {
       const c = f.commits.get(suffix.slice("git/commits/".length));
       return c ? reply(200, { tree: { sha: c.tree } }) : reply(404, { message: "commit missing" });
+    }
+    if (suffix.startsWith("git/trees/") && options.method === "GET") {
+      const files = f.trees.get(suffix.slice("git/trees/".length));
+      if (!files) return reply(404, { message: "tree missing" });
+      const directories = new Map();
+      const entries = [];
+      for (const [name, file] of files) {
+        const slash = name.indexOf("/");
+        if (slash < 0) entries.push({ path: name, mode: "100644", type: "blob", sha: file.sha, size: file.size });
+        else {
+          const directory = name.slice(0, slash);
+          if (!directories.has(directory)) directories.set(directory, new Map());
+          directories.get(directory).set(name.slice(slash + 1), file);
+        }
+      }
+      for (const [name, children] of directories) entries.push({ path: name, mode: "040000", type: "tree", sha: treeOf(children) });
+      return reply(200, { truncated: f.treeTruncated, tree: f.treeEntries || entries });
     }
     if (suffix === "git/trees" && options.method === "POST") {
       const body = JSON.parse(options.body);
@@ -126,7 +145,7 @@ export function fakeGitHub() {
           const { bytes, ...metadata } = e;
           return metadata;
         });
-        return entries.length ? reply(200, entries) : reply(404, { message: "directory missing" });
+        return entries.length ? reply(200, entries.slice(0, 1000)) : reply(404, { message: "directory missing" });
       }
       const file = files.get(name);
       if (!file) return reply(404, { message: "file missing" });
