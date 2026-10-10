@@ -1,6 +1,6 @@
 {
   "name": "magpie-github-sync-plugin",
-  "version": "0.3.0",
+  "version": "0.2.2",
   "description": "Encrypted GitHub setup sync for Magpie through its existing WebDAV workflow.",
   "type": "module",
   "main": "./index.mjs",
