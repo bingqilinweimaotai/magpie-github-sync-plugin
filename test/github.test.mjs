@@ -198,3 +198,35 @@ test("a concurrent edit to the same usage file is not overwritten", async () => 
   await assert.rejects(gh.commitUsage(new Map([[name, { sha, before }]])), (err) => err.status === 412);
   assert.equal(f.files.get("sync/" + name).bytes.toString(), "another encrypted version");
 });
+
+test("large-directory batches reject incomplete trees and preserve concurrent files", async () => {
+  const f = fakeGitHub();
+  for (let i = 0; i < 1005; i++) f.put(`sync/magpie/usage/device-${i}.magpie-usage`, envelope);
+  const name = "magpie/usage/device-1004.magpie-usage";
+  const before = f.files.get("sync/" + name).sha;
+  const gh = new GitHub(config(), f.fetch);
+  await gh.prepare();
+  const sha = await gh.blob(dataEnvelope);
+  const entries = new Map([
+    [name, { sha, before }],
+    ["magpie/usage/new.magpie-usage", { sha, before: null }],
+  ]);
+  const published = f.published.length;
+  f.treeTruncated = true;
+  await assert.rejects(gh.commitUsage(entries), /truncated usage tree/);
+  assert.equal(f.published.length, published);
+  f.treeTruncated = false;
+  f.beforeRefUpdate = () => {
+    f.beforeRefUpdate = null;
+    f.put("sync/magpie/usage/concurrent.magpie-usage", dataEnvelope);
+    f.put("unrelated/keep.txt", envelope);
+  };
+  await gh.commitUsage(entries);
+  assert.equal(f.published.length, published + 3);
+  assert.equal(f.published.filter((c) => c.message.startsWith("magpie: sync usage")).length, 1);
+  assert.deepEqual(f.files.get("sync/" + name).bytes, dataEnvelope);
+  assert.deepEqual(f.files.get("sync/magpie/usage/device-1003.magpie-usage").bytes, envelope);
+  for (const file of ["sync/magpie/usage/new.magpie-usage", "sync/magpie/usage/concurrent.magpie-usage", "unrelated/keep.txt"]) {
+    assert.ok(f.files.has(file));
+  }
+});

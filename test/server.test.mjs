@@ -292,6 +292,37 @@ test("90 sequential daily uploads publish as one commit with readable staged fil
   assert.equal(f.github.published.length, 1);
 });
 
+test("daily reads and unchanged uploads reuse a snapshot until listing or expiry", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const s = await f.bind();
+  const names = Array.from({ length: 90 }, (_, i) => `magpie/usage/device-${i}.magpie-usage`);
+  for (const name of names) f.github.put("sync/" + name, dataEnvelope);
+  const published = f.github.published.length;
+  const requests = f.github.requests.length;
+  for (const name of names) {
+    assert.equal((await f.dav(s, name, "HEAD")).status, 200);
+    assert.deepEqual(Buffer.from(await (await f.dav(s, name)).arrayBuffer()), dataEnvelope);
+    assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 200);
+  }
+  assert.equal(f.github.requests.length - requests, 93);
+  assert.equal(f.github.published.length, published);
+  assert.equal((await (await f.api("status")).json()).pending.count, 0);
+
+  const changed = Buffer.from(JSON.stringify({ ...JSON.parse(dataEnvelope), data: "bmV3" }));
+  f.github.put("sync/" + names[0], changed);
+  const added = "magpie/usage/later.magpie-usage";
+  f.github.put("sync/" + added, dataEnvelope);
+  assert.equal((await f.dav(s, added, "HEAD")).status, 404);
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal((await f.dav(s, added, "HEAD")).status, 200);
+  assert.deepEqual(Buffer.from(await (await f.dav(s, names[0])).arrayBuffer()), changed);
+
+  f.github.put("sync/" + names[0], dataEnvelope);
+  const afterExpiry = Date.now() + 60001;
+  t.mock.method(Date, "now", () => afterExpiry);
+  assert.deepEqual(Buffer.from(await (await f.dav(s, names[0])).arrayBuffer()), dataEnvelope);
+});
+
 test("failed publication keeps a journal, blocks config changes and recovers after restart", async (t) => {
   const f = await fixture(t, { batchIdleMs: 60000 });
   const s = await f.bind();
