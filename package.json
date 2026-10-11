@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
-  "files": ["index.mjs", "lib", "README.md", "LICENSE"],
+  "files": ["index.mjs", "lib", "assets", "README.md", "LICENSE"],
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
@@ -17,5 +17,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "magpie": {
+    "icon": "https://raw.githubusercontent.com/bingqilinweimaotai/magpie-github-sync-plugin/main/assets/github.png"
   }
 }
