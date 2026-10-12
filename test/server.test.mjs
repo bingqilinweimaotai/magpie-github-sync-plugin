@@ -265,6 +265,33 @@ test("saved state survives restart without replacing the local password", async 
   if (process.platform !== "win32") assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
 });
 
+test("history is shown while write verification stays separate and survives restart", async (t) => {
+  const f = await fixture(t);
+  f.github.put("sync/magpie/magpie.magpie-backup", envelope);
+  const s = await f.bind();
+  const status = await (await f.api("status")).json();
+  assert.equal(status.lastCommitAt, new Date(f.github.commitDate).toISOString());
+  assert.equal(status.diagnostics.write, "unverified");
+  assert.equal(status.diagnostics.writeError, "");
+});
+
+test("a successful upload persists write verification across restart", async (t) => {
+  const f = await fixture(t);
+  const s = await f.bind();
+  assert.equal((await f.dav(s, "magpie/magpie.magpie-backup", "PUT", {}, envelope)).status, 201);
+  const before = await (await f.api("status")).json();
+  assert.equal(before.diagnostics.write, "verified");
+  await new Promise((resolve) => f.server.close(resolve));
+  const server = await startBridge({ directory: f.directory, port: 0, fetcher: f.github.fetch });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const page = await (await fetch(origin)).text();
+  const csrf = /name="csrf" content="([^"]+)"/.exec(page)[1];
+  const after = await (await fetch(origin + "/api/status", { headers: { "X-CSRF-Token": csrf } })).json();
+  assert.equal(after.lastCommitAt, before.lastCommitAt);
+  assert.equal(after.diagnostics.write, "verified");
+});
+
 test("90 sequential daily uploads publish as one commit with readable staged files", async (t) => {
   const f = await fixture(t);
   const s = await f.bind();
@@ -304,7 +331,7 @@ test("daily reads and unchanged uploads reuse a snapshot until listing or expiry
     assert.deepEqual(Buffer.from(await (await f.dav(s, name)).arrayBuffer()), dataEnvelope);
     assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 200);
   }
-  assert.equal(f.github.requests.length - requests, 93);
+  assert.equal(f.github.requests.length - requests, 94);
   assert.equal(f.github.published.length, published);
   assert.equal((await (await f.api("status")).json()).pending.count, 0);
 

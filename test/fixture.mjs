@@ -19,6 +19,7 @@ export function fakeGitHub() {
     encoding: "base64", readStatus: 0, entries: null,
     trees: new Map(), commits: new Map(), published: [], beforeRefUpdate: null, afterRefUpdate: null, refUpdateError: null,
     rejectedTokens: new Set(), treeTruncated: false, treeEntries: null,
+    commitDate: "2026-10-11T11:52:04Z",
   };
   const hash = (text) => createHash("sha1").update(text).digest("hex");
   const treeOf = (files) => {
@@ -30,7 +31,7 @@ export function fakeGitHub() {
     const tree = treeOf(f.files);
     const parents = f.empty || !f.head ? [] : [f.head];
     f.head = hash(JSON.stringify({ tree, parents, message, n: f.published.length }));
-    f.commits.set(f.head, { tree, parents, files: new Map(f.files) });
+    f.commits.set(f.head, { tree, parents, files: new Map(f.files), date: f.commitDate });
     if (message !== "initial") f.published.push({ sha: f.head, message });
     f.empty = false;
   };
@@ -60,6 +61,13 @@ export function fakeGitHub() {
       f.status === 403 ? { "X-RateLimit-Remaining": "0", "Retry-After": "120" } : {});
     const suffix = decodeURIComponent(url.pathname).replace(/^\/repos\/owner\/repo\/?/, "");
     if (!suffix) return reply(200, { default_branch: f.branch });
+    if (suffix === "commits" && options.method === "GET") {
+      const path = url.searchParams.get("path") + "/";
+      const file = [...f.files.keys()].find((name) => name.startsWith(path));
+      if (!file) return reply(200, []);
+      const commit = f.commits.get(f.head);
+      return reply(200, [{ sha: f.head, commit: { committer: { date: commit.date } } }]);
+    }
     if (suffix.startsWith("git/ref/heads/")) {
       if (f.refStatus) return reply(f.refStatus, { message: f.refMessage });
       if (f.empty) return reply(409, { message: "Git Repository is empty." });
