@@ -128,16 +128,27 @@ test("settings that only this computer owns never make a difference", () => {
   assert.equal(changed.changed[0].key, "theme");
 });
 
-test("profiles diff by name, and a part only told as a whole says so", () => {
+test("profiles diff by name", () => {
   const local = { providers: [], settings: {}, profiles: { a: { m: 1 }, b: { m: 2 } } };
   const remote = { providers: [], settings: {}, profiles: { a: { m: 1 } } };
-  const d = diffBundle({ local, remote, carried: true, partOnly: { library: true } });
+  const d = diffBundle({ local, remote, carried: true });
   const profiles = d.parts.find((p) => p.part === "profiles");
   assert.deepEqual(profiles.added.map((e) => e.key), ["b"]);
-  const library = d.parts.find((p) => p.part === "library");
-  assert.equal(library.level, "part");
-  assert.equal(library.changed, true);
   assert.equal(d.changed, true);
+});
+
+test("the agents part is compared by magpie's hash, and says it is approximate", () => {
+  const base = { providers: [], settings: {}, profiles: {} };
+  const same = diffBundle({ local: base, remote: base, carried: true, partOnly: { agents: false } });
+  const agents = same.parts.find((p) => p.part === "agents");
+  assert.equal(agents.level, "part");
+  assert.equal(agents.approximate, true);
+  assert.equal(agents.changed, false);
+  // magpie's own part hashes say the two differ, even with nothing to show
+  // field by field: that is what this part reports.
+  const differs = diffBundle({ local: base, remote: base, carried: true, partOnly: { agents: true } });
+  assert.equal(differs.parts.find((p) => p.part === "agents").changed, true);
+  assert.equal(differs.changed, true);
 });
 
 test("an unreadable local file is an error, never an empty setup", async () => {
@@ -229,22 +240,19 @@ test("a strategy set back to smart is not a change", () => {
   assert.equal(part.changed.length, 0);
 });
 
-test("an agent field this computer never set is not reported as removed", () => {
-  // applied.json holds only what magpie wrote; the bundle's snapshot holds
-  // every field, so a field the agent set for itself must not look removed.
-  const local = { providers: [], settings: {}, profiles: {}, agents: { "dsh.model": "m" } };
-  const remote = { providers: [], settings: {}, profiles: {}, agents: { "dsh.model": "m", "dsh.effort": "high" } };
-  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "agents");
-  assert.equal(part.removed.length, 0, "a field magpie never set was reported removed");
-  assert.equal(part.changed.length, 0);
-});
-
-test("a changed agent model is still shown", () => {
+// The agents part is not compared field by field: applied.json records what
+// magpie once set, not the live value, and reading each agent's config would
+// mean redoing every agent's rules. It is reported by magpie's own part hash
+// instead, and marked approximate so the page can say so.
+test("the agents part never claims a field-level difference", () => {
   const local = { providers: [], settings: {}, profiles: {}, agents: { "codex.model": "group/new" } };
   const remote = { providers: [], settings: {}, profiles: {}, agents: { "codex.model": "old" } };
-  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "agents");
-  assert.equal(part.changed.length, 1);
-  assert.deepEqual(part.changed[0].fields[0], { path: "value", before: "old", after: "group/new" });
+  const part = diffBundle({ local, remote, carried: true, partOnly: { agents: true } }).parts
+    .find((p) => p.part === "agents");
+  assert.equal(part.level, "part");
+  assert.equal(part.added, undefined, "a part-level answer carries no entries");
+  assert.equal(part.changed, true, "magpie's hash said the part differs");
+  assert.equal(part.approximate, true);
 });
 
 test("the parts are named as magpie's own sync page names them", async () => {
@@ -254,4 +262,52 @@ test("the parts are named as magpie's own sync page names them", async () => {
   assert.equal(PART_NAMES.providers.zh, "供应商");
   assert.equal(MEMBERS.groups.zh, "路由组");
   assert.equal(MEMBERS.plugins.zh, "插件");
+});
+
+// The library is compared for real: the bundle carries each skill's files,
+// and hashing them the way magpie hashes a folder gives the hash this
+// computer keeps. Getting this wrong made every synced library look changed.
+const b64 = (s) => Buffer.from(s).toString("base64");
+const skillFiles = (text) => ({ files: { "SKILL.md": b64(text) } });
+
+test("a library the bundle and this computer agree on shows no change", async () => {
+  const { librarySkillHash } = await import("../lib/diff.mjs");
+  const files = skillFiles("# Archify");
+  const local = { providers: [], settings: {}, profiles: {},
+    library: { instructions: { agents: [] }, mcp: null,
+      skills: [{ name: "archify", agents: [], hash: librarySkillHash(files.files) }] } };
+  const remote = { providers: [], settings: {}, profiles: {},
+    library: { instructions: { agents: [] }, mcp: null,
+      skills: [{ name: "archify", agents: [], ...files }] } };
+  const library = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "library");
+  assert.equal(library.added.length, 0);
+  assert.equal(library.changed.length, 0);
+  assert.equal(library.removed.length, 0);
+});
+
+test("a skill whose files changed, or that was added or removed, is shown", async () => {
+  const { librarySkillHash } = await import("../lib/diff.mjs");
+  const local = { providers: [], settings: {}, profiles: {},
+    library: { instructions: null, mcp: null, skills: [
+      { name: "edited", agents: [], hash: librarySkillHash(skillFiles("new text").files) },
+      { name: "only-here", agents: [], hash: "b".repeat(64) },
+    ] } };
+  const remote = { providers: [], settings: {}, profiles: {},
+    library: { instructions: null, mcp: null, skills: [
+      { name: "edited", agents: [], ...skillFiles("old text") },
+      { name: "only-there", agents: [], ...skillFiles("gone") },
+    ] } };
+  const library = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "library");
+  assert.deepEqual(library.added.map((e) => e.name), ["only-here"]);
+  assert.deepEqual(library.removed.map((e) => e.name), ["only-there"]);
+  assert.deepEqual(library.changed.map((e) => e.name), ["edited"]);
+});
+
+test("a library's instructions and MCP servers are compared too", () => {
+  const local = { providers: [], settings: {}, profiles: {},
+    library: { instructions: { agents: ["claude"] }, mcp: [{ name: "srv", command: "b" }], skills: [] } };
+  const remote = { providers: [], settings: {}, profiles: {},
+    library: { instructions: { agents: [] }, mcp: [{ name: "srv", command: "a" }], skills: [] } };
+  const library = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "library");
+  assert.ok(library.fields.length > 0, "instructions or MCP changes were not compared");
 });
