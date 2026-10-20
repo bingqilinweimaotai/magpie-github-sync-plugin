@@ -418,3 +418,57 @@ test("interrupted uploads flush after idle and graceful close", async (t) => {
   await new Promise((resolve) => f.server.close(resolve));
   assert.equal(f.github.published.length, 2);
 });
+
+test("a staged upload answers before GitHub takes the blob, so 90 days run at disk speed", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const s = await f.bind();
+  // Every blob upload hangs until released: with the old behaviour the very
+  // first PUT could not answer at all.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  f.github.beforeBlob = () => gate;
+  const name = "magpie/usage/computer-2026-10-09.magpie-usage";
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 201);
+  assert.equal((await f.dav(s, "magpie/usage/computer-2026-10-10.magpie-usage", "PUT", {}, dataEnvelope)).status, 201);
+  // Both were staged without waiting for GitHub, and the journal has them.
+  const status = await (await f.api("status")).json();
+  assert.equal(status.pending.count, 2);
+  assert.equal(f.github.blobAttempts >= 1, true);
+  release();
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal(f.github.published.length, 1);
+  assert.equal(f.github.files.size, 2);
+});
+
+test("blob uploads stay within the concurrency cap and are retried after a failure", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const s = await f.bind();
+  let open = 0;
+  f.github.beforeBlob = async () => { open++; await new Promise((r) => setTimeout(r, 15)); open--; };
+  const names = Array.from({ length: 30 }, (_, i) => `magpie/usage/computer-day-${i}.magpie-usage`);
+  for (const name of names) {
+    assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 201);
+  }
+  // The staged uploads are queued; one flush publishes them all.
+  f.github.beforeBlob = null;
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.equal(f.github.published.length, 1);
+  assert.equal(f.github.files.size, 30);
+  assert.ok(f.github.blobPeak <= 6, `blob concurrency ${f.github.blobPeak} exceeded the cap`);
+});
+
+test("a blob upload that failed while staging is sent again at publication", async (t) => {
+  const f = await fixture(t, { batchIdleMs: 60000 });
+  const s = await f.bind();
+  const name = "magpie/usage/computer-2026-10-09.magpie-usage";
+  // The staged upload fails, but the journal keeps the entry, so the PUT that
+  // staged it still answers and the batch is published from the spool.
+  f.github.blobFailures = 1;
+  assert.equal((await f.dav(s, name, "PUT", {}, dataEnvelope)).status, 201);
+  const attemptsAfterStage = f.github.blobAttempts;
+  assert.equal((await f.dav(s, "magpie/usage/", "PROPFIND", { Depth: "1" })).status, 207);
+  assert.ok(f.github.blobAttempts > attemptsAfterStage, "the failed blob was not sent again");
+  assert.equal(f.github.published.length, 1);
+  assert.deepEqual(f.github.files.get("sync/" + name).bytes, dataEnvelope);
+  assert.deepEqual(await fs.readdir(path.join(f.directory, "github-sync-plugin", "usage-blobs")), []);
+});

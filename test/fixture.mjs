@@ -20,6 +20,9 @@ export function fakeGitHub() {
     trees: new Map(), commits: new Map(), published: [], beforeRefUpdate: null, afterRefUpdate: null, refUpdateError: null,
     rejectedTokens: new Set(), treeTruncated: false, treeEntries: null,
     commitDate: "2026-10-11T11:52:04Z",
+    // beforeBlob holds a blob upload before it answers, so a test can see
+    // what the bridge does while GitHub is still taking it.
+    beforeBlob: null, blobAttempts: 0, blobFailures: 0, blobInFlight: 0, blobPeak: 0,
   };
   const hash = (text) => createHash("sha1").update(text).digest("hex");
   const treeOf = (files) => {
@@ -75,11 +78,21 @@ export function fakeGitHub() {
         ? reply(200, { ref: "refs/heads/" + f.branch, object: { sha: f.head } }) : reply(404, { message: "branch missing" });
     }
     if (suffix === "git/blobs" && options.method === "POST") {
-      const body = JSON.parse(options.body);
-      const bytes = Buffer.from(body.content, body.encoding);
-      const sha = blobSHA(bytes);
-      f.blobs.set(sha, bytes);
-      return reply(201, { sha });
+      f.blobAttempts++;
+      f.blobInFlight++;
+      f.blobPeak = Math.max(f.blobPeak, f.blobInFlight);
+      try {
+        if (f.beforeBlob) await f.beforeBlob(f.blobAttempts);
+        if (f.blobFailures > 0) {
+          f.blobFailures--;
+          return reply(422, { message: "blob refused" });
+        }
+        const body = JSON.parse(options.body);
+        const bytes = Buffer.from(body.content, body.encoding);
+        const sha = blobSHA(bytes);
+        f.blobs.set(sha, bytes);
+        return reply(201, { sha });
+      } finally { f.blobInFlight--; }
     }
     if (suffix.startsWith("git/blobs/")) {
       const bytes = f.blobs.get(suffix.slice("git/blobs/".length));
