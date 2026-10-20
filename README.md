@@ -149,12 +149,12 @@ GitHub Contents API 的目录列表到 1,000 条就不再返回更多，原生�
 | 供应商 | 供应商本身、**路由组**（含选择策略与成员顺序）、供应商顺序、路由组顺序、网页搜索 API、供应商图标、**插件** |
 | 设置 | 一般设置，以及**网关密钥** |
 | Profile | 各配置档案的字段 |
-| agent 的模型 | 按 Magpie 自己的部分 hash 判断，不逐字段比较 |
+| agent 的模型 | 上次同步之后改动过的字段，逐个列出 |
 | 资源库 | 指令、MCP 服务器，以及逐个 skill（新增、删除、内容改动） |
 
 **资源库**：本机 `library.json` 为每个 skill 保存文件夹的 hash，备份中保存的是内联的 `files`（base64 全文）。插件按 Magpie `hashWalk`（`internal/library/skillcheck.go`）的同一规则——按路径排序，每个文件写 `file <路径> <大小>\n` 再附内容，跳过 `.git` 与 `.magpie-library`——把备份里的 `files` 算出 hash，与本机保存的 hash 比对。
 
-**agent 的模型**：这部分是 Magpie 对各 agent 实时配置的快照，值来自每个 agent 自己的配置文件（codex 的 `config.toml`、Claude 的 `settings.json` 等）。插件不重做各 agent 的解析规则，因此只比较 Magpie 自己的部分 hash，页面上标注"按 magpie 自己的 hash 比对"：一致表示上次同步把这一部分整体搬过，而不是每个模型都逐项核对过。
+**agent 的模型**：依据 Magpie 自己的记录 `applied.json`，它记下 Magpie 在每个 agent 上设置过的字段以及设置时间。某条记录晚于上次同步，就是这个字段还没上传；早于上次同步的则已在备份中。因此这里列出的是**下次同步将上传的字段**，并给出服务器上的旧值。改过之后又已同步的字段不会出现。
 
 比较时遵循的规则：
 

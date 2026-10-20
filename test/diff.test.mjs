@@ -137,18 +137,35 @@ test("profiles diff by name", () => {
   assert.equal(d.changed, true);
 });
 
-test("the agents part is compared by magpie's hash, and says it is approximate", () => {
-  const base = { providers: [], settings: {}, profiles: {} };
-  const same = diffBundle({ local: base, remote: base, carried: true, partOnly: { agents: false } });
-  const agents = same.parts.find((p) => p.part === "agents");
-  assert.equal(agents.level, "part");
-  assert.equal(agents.approximate, true);
-  assert.equal(agents.changed, false);
-  // magpie's own part hashes say the two differ, even with nothing to show
-  // field by field: that is what this part reports.
-  const differs = diffBundle({ local: base, remote: base, carried: true, partOnly: { agents: true } });
-  assert.equal(differs.parts.find((p) => p.part === "agents").changed, true);
-  assert.equal(differs.changed, true);
+// The agents part reads applied.json, which records each field magpie set on
+// an agent and when. A record newer than the backup is a change still to
+// upload; an older one is already synced. Reading it by time is what makes
+// the part exact without redoing every agent's parsing rules.
+test("an agent field changed after the last sync is shown, with both values", () => {
+  const remote = { providers: [], settings: {}, profiles: {}, agents: { "claude.model": "auto/dfmodel[1m]" } };
+  const local = {
+    providers: [], settings: {}, profiles: {},
+    syncedAt: "2026-10-20T20:45:49.1948141+08:00",
+    applied: { claude: { at: "2026-10-20T21:00:35.3953789+08:00", fields: { model: "auto/gfmodel[1m]" } } },
+  };
+  const agents = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "agents");
+  assert.equal(agents.changed.length, 1);
+  assert.deepEqual(agents.changed[0].fields[0],
+    { path: "value", before: "auto/dfmodel[1m]", after: "auto/gfmodel[1m]" });
+});
+
+test("an agent field already synced is not shown", () => {
+  const remote = { providers: [], settings: {}, profiles: {}, agents: { "codex.model": "gpt-6.1-sol" } };
+  // Recorded before the backup was made: the bundle already has it, so the
+  // difference in applied.json is history, not a pending upload.
+  const local = {
+    providers: [], settings: {}, profiles: {},
+    syncedAt: "2026-10-20T20:45:49+08:00",
+    applied: { codex: { at: "2026-10-15T11:07:17+08:00", fields: { model: "group/auto-gpt-6-1-sol" } } },
+  };
+  const agents = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "agents");
+  assert.equal(agents.changed.length, 0);
+  assert.equal(agents.added.length, 0);
 });
 
 test("an unreadable local file is an error, never an empty setup", async () => {
@@ -240,19 +257,18 @@ test("a strategy set back to smart is not a change", () => {
   assert.equal(part.changed.length, 0);
 });
 
-// The agents part is not compared field by field: applied.json records what
-// magpie once set, not the live value, and reading each agent's config would
-// mean redoing every agent's rules. It is reported by magpie's own part hash
-// instead, and marked approximate so the page can say so.
-test("the agents part never claims a field-level difference", () => {
-  const local = { providers: [], settings: {}, profiles: {}, agents: { "codex.model": "group/new" } };
-  const remote = { providers: [], settings: {}, profiles: {}, agents: { "codex.model": "old" } };
-  const part = diffBundle({ local, remote, carried: true, partOnly: { agents: true } }).parts
-    .find((p) => p.part === "agents");
-  assert.equal(part.level, "part");
-  assert.equal(part.added, undefined, "a part-level answer carries no entries");
-  assert.equal(part.changed, true, "magpie's hash said the part differs");
-  assert.equal(part.approximate, true);
+// A record whose time cannot be placed against the backup is left out: a
+// guess would report a synced setup as pending.
+test("an agent record with no usable time is left out", () => {
+  const remote = { providers: [], settings: {}, profiles: {}, agents: { "claude.model": "old" } };
+  const local = {
+    providers: [], settings: {}, profiles: {},
+    syncedAt: "2026-10-20T20:45:49+08:00",
+    applied: { claude: { at: "", fields: { model: "new" } } },
+  };
+  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "agents");
+  assert.equal(part.added.length, 0);
+  assert.equal(part.changed.length, 0);
 });
 
 test("the parts are named as magpie's own sync page names them", async () => {
