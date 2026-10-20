@@ -1,0 +1,183 @@
+import assert from "node:assert/strict";
+import { createCipheriv, pbkdf2Sync, randomBytes } from "node:crypto";
+import { gzipSync } from "node:zlib";
+import { test } from "node:test";
+import { openBackup, openData, SealedError } from "../lib/sealed.mjs";
+import { diffBundle, scrub, withoutKeys } from "../lib/diff.mjs";
+
+// seal is backup.Seal from magpie's side: AES-256-GCM under a PBKDF2-SHA256
+// key, with the envelope's own fields as the additional data. Writing it here
+// keeps the test off a Go toolchain while still checking the real format.
+function seal(bundle, passphrase, { iterations = 600_000, format = "magpie-backup" } = {}) {
+  const salt = randomBytes(16);
+  const nonce = randomBytes(12);
+  const key = pbkdf2Sync(passphrase, salt, iterations, 32, "sha256");
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(Buffer.from(`${format}/1/pbkdf2-sha256/${iterations}/${salt.toString("hex")}`));
+  const plain = Buffer.isBuffer(bundle) ? bundle : Buffer.from(JSON.stringify(bundle));
+  const body = Buffer.concat([cipher.update(plain), cipher.final(), cipher.getAuthTag()]);
+  return Buffer.from(JSON.stringify({
+    format, version: 1, kdf: "pbkdf2-sha256", iterations,
+    salt: salt.toString("base64"), nonce: nonce.toString("base64"), data: body.toString("base64"),
+  }));
+}
+
+const bundle = () => ({
+  version: 2, created: "2026-10-20T00:00:00Z", app: "magpie", keys: true,
+  providers: [{ id: "one", name: "One", key: "sk-secret-one" }],
+  settings: { theme: "dark", port: 1 },
+  profiles: { main: { model: "a" } },
+  agents: { "claude.effort": "high" },
+  library: { mcp: [] },
+});
+
+test("a sealed backup opens, and a wrong passphrase fails the tag", () => {
+  const bytes = seal(bundle(), "pass", { iterations: 100_000 });
+  const opened = openBackup(bytes, "pass");
+  assert.equal(opened.providers[0].id, "one");
+  assert.equal(opened.settings.theme, "dark");
+  assert.throws(() => openBackup(bytes, "other"), (e) => e instanceof SealedError && e.code === "passphrase");
+});
+
+test("a bundle that isn't one, a newer seal and a damaged file all fail alone", () => {
+  assert.throws(() => openBackup(Buffer.from("not json"), "p"), (e) => e.code === "unreadable");
+  assert.throws(() => openBackup(seal(bundle(), "p", { format: "magpie-data" }), "p"), (e) => e.code === "format");
+  const newer = JSON.parse(seal(bundle(), "p").toString());
+  newer.version = 2;
+  assert.throws(() => openBackup(Buffer.from(JSON.stringify(newer)), "p"), (e) => e.code === "version");
+  // A byte changed in the ciphertext is a failed tag, never a partial bundle.
+  const damaged = JSON.parse(seal(bundle(), "p").toString());
+  const data = Buffer.from(damaged.data, "base64");
+  data[0] ^= 0xff;
+  damaged.data = data.toString("base64");
+  assert.throws(() => openBackup(Buffer.from(JSON.stringify(damaged)), "p"), (e) => e.code === "passphrase");
+});
+
+test("usage files open under their own format and never as a setup backup", () => {
+  const gzipped = gzipSync(Buffer.from(JSON.stringify({ day: "2026-10-20" })));
+  const bytes = seal(gzipped, "p", { format: "magpie-data" });
+  assert.equal(JSON.parse(openData(bytes, "p").toString("utf8")).day, "2026-10-20");
+  assert.throws(() => openBackup(bytes, "p"), (e) => e.code === "format");
+  // An envelope that isn't gzipped inside was not written by usage sharing.
+  assert.throws(() => openData(seal({ day: "x" }, "p", { format: "magpie-data" }), "p"),
+    (e) => e.code === "format");
+});
+
+test("the four envelope fields are covered: changing one fails the tag", () => {
+  const original = JSON.parse(seal(bundle(), "p", { iterations: 100_000 }).toString());
+  for (const field of ["iterations", "salt"]) {
+    const changed = JSON.parse(JSON.stringify(original));
+    if (field === "iterations") changed.iterations = 100_001;
+    else changed.salt = randomBytes(16).toString("base64");
+    assert.throws(() => openBackup(Buffer.from(JSON.stringify(changed)), "p"),
+      (e) => e instanceof SealedError, `${field} was not covered by the seal`);
+  }
+});
+
+test("a credential is masked wherever it sits, and a plain field is not", () => {
+  assert.equal(scrub({ key: "sk-abcdefghijkl" }).key, "••••ijkl");
+  assert.equal(scrub({ apiKey: "sk-abcdefghijkl" }).apiKey, "••••ijkl");
+  assert.equal(scrub({ headers: { Authorization: "Bearer abcdefgh" } }).headers.Authorization, "••••efgh");
+  assert.equal(scrub({ name: "visible" }).name, "visible");
+  // A field whose name only looks like a credential stays readable.
+  assert.equal(scrub({ keyName: "primary" }).keyName, "primary");
+});
+
+test("a changed credential is shown masked, never in the clear", () => {
+  const local = { providers: [{ id: "one", name: "One", key: "sk-NEWSECRET-aaaaaaaa" }], settings: {}, profiles: {} };
+  const remote = { providers: [{ id: "one", name: "One", key: "sk-OLDSECRET-bbbbbbbb" }], settings: {}, profiles: {} };
+  const d = diffBundle({ local, remote, carried: true });
+  const fields = d.parts.find((p) => p.part === "providers").changed[0].fields;
+  assert.equal(fields[0].path, "key");
+  assert.match(fields[0].before, /^••••/);
+  assert.match(fields[0].after, /^••••/);
+  assert.equal(JSON.stringify(d).includes("SECRET"), false);
+});
+
+test("a keyless bundle does not report every key as removed", () => {
+  const local = { providers: [{ id: "one", name: "One", key: "sk-abc", keyName: "k" }], settings: {}, profiles: {} };
+  const remote = { providers: [withoutKeys({ id: "one", name: "One", key: "sk-abc", keyName: "k" })], settings: {}, profiles: {} };
+  const d = diffBundle({ local, remote, carried: false });
+  const part = d.parts.find((p) => p.part === "providers");
+  assert.equal(part.changed.length, 0, "a keyless bundle was compared with keys in place");
+  assert.equal(d.changed, false);
+});
+
+test("added, removed and changed providers are told apart", () => {
+  const local = { providers: [{ id: "a", name: "A" }, { id: "b", name: "B2" }], settings: {}, profiles: {} };
+  const remote = { providers: [{ id: "a", name: "A" }, { id: "b", name: "B" }, { id: "c", name: "C" }], settings: {}, profiles: {} };
+  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "providers");
+  assert.deepEqual(part.added.map((e) => e.key), ["b"].slice(0, 0)); // b exists on both, only renamed
+  assert.deepEqual(part.removed.map((e) => e.key), ["c"]);
+  assert.equal(part.changed.length, 1);
+  assert.equal(part.changed[0].key, "b");
+  assert.deepEqual(part.changed[0].fields[0], { path: "name", before: "B", after: "B2" });
+});
+
+test("settings that only this computer owns never make a difference", () => {
+  const local = { providers: [], settings: { theme: "dark", port: 3437, proxy: "x" }, profiles: {} };
+  const remote = { providers: [], settings: { theme: "dark", port: 1 }, profiles: {} };
+  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "settings");
+  assert.equal(part.changed.length, 0);
+  local.settings.theme = "light";
+  const changed = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "settings");
+  assert.equal(changed.changed.length, 1);
+  assert.equal(changed.changed[0].key, "theme");
+});
+
+test("profiles diff by name, and a part only told as a whole says so", () => {
+  const local = { providers: [], settings: {}, profiles: { a: { m: 1 }, b: { m: 2 } } };
+  const remote = { providers: [], settings: {}, profiles: { a: { m: 1 } } };
+  const d = diffBundle({ local, remote, carried: true, partOnly: { library: true } });
+  const profiles = d.parts.find((p) => p.part === "profiles");
+  assert.deepEqual(profiles.added.map((e) => e.key), ["b"]);
+  const library = d.parts.find((p) => p.part === "library");
+  assert.equal(library.level, "part");
+  assert.equal(library.changed, true);
+  assert.equal(d.changed, true);
+});
+
+test("an unreadable local file is an error, never an empty setup", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { diffSetup } = await import("../lib/setupdiff.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-diff-unit-"));
+  const cleanup = () => fs.rmSync(directory, { recursive: true, force: true });
+  try {
+    fs.writeFileSync(path.join(directory, "sync.json"), JSON.stringify({
+      url: "http://127.0.0.1:3437/dav/x", passphrase: "p", keys: true }));
+    fs.writeFileSync(path.join(directory, "sync-server.magpie-backup"),
+      seal(bundle(), "p", { iterations: 100_000 }));
+    fs.writeFileSync(path.join(directory, "providers.json"), "{ not json");
+    const result = diffSetup(directory);
+    // The file is there but unreadable: reported, never taken as no providers.
+    assert.equal(result.available, false);
+    assert.equal(result.reason, "local");
+  } finally { cleanup(); }
+});
+
+test("a config with no sync, no cached backup or a bad passphrase says which", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { diffSetup } = await import("../lib/setupdiff.mjs");
+  const make = () => fs.mkdtempSync(path.join(os.tmpdir(), "magpie-diff-case-"));
+  const cases = [];
+  const none = make();
+  cases.push([none, "no-sync"]);
+  const noBackup = make();
+  fs.writeFileSync(path.join(noBackup, "sync.json"), JSON.stringify({ url: "http://h/dav/x", passphrase: "p" }));
+  cases.push([noBackup, "no-backup"]);
+  const wrongPass = make();
+  fs.writeFileSync(path.join(wrongPass, "sync.json"), JSON.stringify({ url: "http://h/dav/x", passphrase: "nope" }));
+  fs.writeFileSync(path.join(wrongPass, "sync-server.magpie-backup"), seal(bundle(), "p", { iterations: 100_000 }));
+  cases.push([wrongPass, "passphrase"]);
+  try {
+    for (const [directory, want] of cases) {
+      const result = diffSetup(directory);
+      assert.equal(result.available, false, want);
+      assert.equal(result.reason, want);
+    }
+  } finally { for (const [directory] of cases) fs.rmSync(directory, { recursive: true, force: true }); }
+});

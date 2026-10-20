@@ -472,3 +472,46 @@ test("a blob upload that failed while staging is sent again at publication", asy
   assert.deepEqual(f.github.files.get("sync/" + name).bytes, dataEnvelope);
   assert.deepEqual(await fs.readdir(path.join(f.directory, "github-sync-plugin", "usage-blobs")), []);
 });
+
+test("comparing setup needs an explicit allow, and revoking it stops the read", async (t) => {
+  const f = await fixture(t);
+  // No Magpie sync beside this profile: the diff has nothing to compare.
+  const before = await f.api("diff");
+  assert.equal(before.status, 403, "a diff ran before it was allowed");
+  assert.match(await before.text(), /Allow reading/);
+  assert.equal((await (await f.api("status")).json()).plaintext, false);
+
+  const allow = await f.api("plaintext", { allow: true });
+  assert.equal(allow.status, 200);
+  assert.deepEqual(await allow.json(), { plaintext: true });
+  assert.equal((await (await f.api("status")).json()).plaintext, true);
+
+  // Allowed but this profile has no sync.json: answered as unavailable, not
+  // as an empty setup.
+  const none = await f.api("diff");
+  assert.equal(none.status, 409);
+  assert.match(await none.text(), /no sync configured/);
+
+  const off = await f.api("plaintext", { allow: false });
+  assert.equal(off.status, 200);
+  assert.equal((await f.api("diff")).status, 403, "revoking did not stop the read");
+});
+
+test("the allow switch is kept across a restart, and needs a real boolean", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.api("plaintext", { allow: true })).status, 200);
+  assert.equal(readState(f.directory).plaintext, true);
+  // Anything but a boolean is refused rather than taken as yes.
+  for (const allow of ["yes", 1, null, {}]) {
+    assert.equal((await f.api("plaintext", { allow })).status, 400);
+  }
+  assert.equal(readState(f.directory).plaintext, true);
+  await new Promise((resolve) => f.server.close(resolve));
+  const server = await startBridge({ directory: f.directory, port: 0, fetcher: f.github.fetch });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const page = await (await fetch(origin)).text();
+  const csrf = /name="csrf" content="([^"]+)"/.exec(page)[1];
+  const after = await (await fetch(origin + "/api/status", { headers: { "X-CSRF-Token": csrf } })).json();
+  assert.equal(after.plaintext, true, "the allow switch did not survive a restart");
+});
