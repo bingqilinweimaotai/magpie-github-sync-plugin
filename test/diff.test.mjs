@@ -83,11 +83,15 @@ test("a credential is masked wherever it sits, and a plain field is not", () => 
   assert.equal(scrub({ keyName: "primary" }).keyName, "primary");
 });
 
+// member returns one member of a part, by its id, for tests that look at the
+// providers part's several lists.
+const member = (part, id) => (part.members ?? []).find((m) => m.id === id);
+
 test("a changed credential is shown masked, never in the clear", () => {
   const local = { providers: [{ id: "one", name: "One", key: "sk-NEWSECRET-aaaaaaaa" }], settings: {}, profiles: {} };
   const remote = { providers: [{ id: "one", name: "One", key: "sk-OLDSECRET-bbbbbbbb" }], settings: {}, profiles: {} };
   const d = diffBundle({ local, remote, carried: true });
-  const fields = d.parts.find((p) => p.part === "providers").changed[0].fields;
+  const fields = member(d.parts.find((p) => p.part === "providers"), "providers").changed[0].fields;
   assert.equal(fields[0].path, "key");
   assert.match(fields[0].before, /^••••/);
   assert.match(fields[0].after, /^••••/);
@@ -98,7 +102,7 @@ test("a keyless bundle does not report every key as removed", () => {
   const local = { providers: [{ id: "one", name: "One", key: "sk-abc", keyName: "k" }], settings: {}, profiles: {} };
   const remote = { providers: [withoutKeys({ id: "one", name: "One", key: "sk-abc", keyName: "k" })], settings: {}, profiles: {} };
   const d = diffBundle({ local, remote, carried: false });
-  const part = d.parts.find((p) => p.part === "providers");
+  const part = member(d.parts.find((p) => p.part === "providers"), "providers");
   assert.equal(part.changed.length, 0, "a keyless bundle was compared with keys in place");
   assert.equal(d.changed, false);
 });
@@ -106,8 +110,7 @@ test("a keyless bundle does not report every key as removed", () => {
 test("added, removed and changed providers are told apart", () => {
   const local = { providers: [{ id: "a", name: "A" }, { id: "b", name: "B2" }], settings: {}, profiles: {} };
   const remote = { providers: [{ id: "a", name: "A" }, { id: "b", name: "B" }, { id: "c", name: "C" }], settings: {}, profiles: {} };
-  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "providers");
-  assert.deepEqual(part.added.map((e) => e.key), ["b"].slice(0, 0)); // b exists on both, only renamed
+  const part = member(diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "providers"), "providers");
   assert.deepEqual(part.removed.map((e) => e.key), ["c"]);
   assert.equal(part.changed.length, 1);
   assert.equal(part.changed[0].key, "b");
@@ -180,4 +183,75 @@ test("a config with no sync, no cached backup or a bad passphrase says which", a
       assert.equal(result.reason, want);
     }
   } finally { for (const [directory] of cases) fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+// The providers part of magpie's hash folds in more than the providers list.
+// Each of these once went unseen, so each is held here.
+test("every member of the providers part is compared", () => {
+  const base = () => ({ providers: [{ id: "p", name: "P", key: "sk-xxxxxxxxxxxx" }], groups: [],
+    order: [], groupOrder: [], searches: [], icons: {}, plugins: [], settings: {}, profiles: {} });
+  const remote = base();
+  const cases = {
+    groups: (l) => { l.groups = [{ id: "g", name: "G", members: [] }]; },
+    order: (l) => { l.order = ["b", "a"]; },
+    groupOrder: (l) => { l.groupOrder = ["z", "y"]; },
+    searches: (l) => { l.searches = [{ id: "s", name: "S" }]; },
+    icons: (l) => { l.icons = { "a.png": "bytes" }; },
+    plugins: (l) => { l.plugins = [{ spec: "@x/y" }]; },
+  };
+  for (const [id, mutate] of Object.entries(cases)) {
+    const local = base();
+    mutate(local);
+    const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "providers");
+    assert.ok(member(part, id).added.length + member(part, id).removed.length + member(part, id).changed.length > 0,
+      `${id} was not compared`);
+  }
+});
+
+test("a routing group's strategy and member order are both shown", () => {
+  const local = { providers: [], settings: {}, profiles: {},
+    groups: [{ id: "g", name: "G", routing: "least-used", members: ["b", "a"] }] };
+  const remote = { providers: [], settings: {}, profiles: {},
+    groups: [{ id: "g", name: "G", members: ["a", "b"] }] };
+  const part = member(diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "providers"), "groups");
+  const fields = part.changed[0].fields;
+  // smart is what a missing strategy means, so its default is not a change.
+  assert.deepEqual(fields.find((f) => f.path === "routing"), { path: "routing", before: "smart", after: "least-used" });
+  assert.ok(fields.some((f) => f.path === "members"));
+});
+
+test("a strategy set back to smart is not a change", () => {
+  const local = { providers: [], settings: {}, profiles: {},
+    groups: [{ id: "g", name: "G", routing: "smart" }] };
+  const remote = { providers: [], settings: {}, profiles: {},
+    groups: [{ id: "g", name: "G" }] };
+  const part = member(diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "providers"), "groups");
+  assert.equal(part.changed.length, 0);
+});
+
+test("an agent field this computer never set is not reported as removed", () => {
+  // applied.json holds only what magpie wrote; the bundle's snapshot holds
+  // every field, so a field the agent set for itself must not look removed.
+  const local = { providers: [], settings: {}, profiles: {}, agents: { "dsh.model": "m" } };
+  const remote = { providers: [], settings: {}, profiles: {}, agents: { "dsh.model": "m", "dsh.effort": "high" } };
+  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "agents");
+  assert.equal(part.removed.length, 0, "a field magpie never set was reported removed");
+  assert.equal(part.changed.length, 0);
+});
+
+test("a changed agent model is still shown", () => {
+  const local = { providers: [], settings: {}, profiles: {}, agents: { "codex.model": "group/new" } };
+  const remote = { providers: [], settings: {}, profiles: {}, agents: { "codex.model": "old" } };
+  const part = diffBundle({ local, remote, carried: true }).parts.find((p) => p.part === "agents");
+  assert.equal(part.changed.length, 1);
+  assert.deepEqual(part.changed[0].fields[0], { path: "value", before: "old", after: "group/new" });
+});
+
+test("the parts are named as magpie's own sync page names them", async () => {
+  const { PART_NAMES, MEMBERS } = await import("../lib/diff.mjs");
+  assert.equal(PART_NAMES.library.zh, "资源库");
+  assert.equal(PART_NAMES.agents.zh, "agent 的模型");
+  assert.equal(PART_NAMES.providers.zh, "供应商");
+  assert.equal(MEMBERS.groups.zh, "路由组");
+  assert.equal(MEMBERS.plugins.zh, "插件");
 });
